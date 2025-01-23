@@ -1,0 +1,9 @@
+---
+- name: authselect_apply_changes
+  command: authselect apply-changes
+
+- name: sssd_restart
+  systemd_service:
+    name: sssd
+    state: restarted
+...

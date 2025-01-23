@@ -1,0 +1,155 @@
+---
+- name: Update package facts
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Install authselect package
+  ansible.builtin.package:
+    name: authselect
+    state: present
+
+- name: Check if the custom profile exists
+  ansible.builtin.command:
+    cmd: authselect list-features {{ authselect_profile_name }}
+  register: result_custom_profile_exists
+  changed_when: false
+  failed_when: false
+
+- name: Create custom profile
+  ansible.builtin.command:
+    cmd: authselect create-profile {{ authselect_profile_name }} -v -b sssd --symlink-meta
+  when: result_custom_profile_exists.rc == 2
+
+- name: Check if authselect is in use
+  ansible.builtin.command:
+    cmd: authselect current
+  register: result_authselect_in_use
+  changed_when: false
+  failed_when: false
+
+- name: Set a temporary default profile
+  ansible.builtin.command:
+    cmd: authselect select sssd --force
+  when: result_authselect_in_use.rc != 0
+
+- name: Get current profile
+  ansible.builtin.shell:
+    cmd: authselect current -r | awk '{ print $1 }'
+  register: result_current_profile
+  changed_when: false
+  when: result_authselect_in_use.rc == 0
+
+- name: Check if current authselect profile is valid
+  ansible.builtin.command:
+    cmd: authselect check
+  register: result_check_profile
+  changed_when: false
+  failed_when: false
+  when: result_current_profile is not skipped
+
+- name: Check current profile features
+  ansible.builtin.shell:
+    cmd: authselect current | tail -n+3 | awk '{ print $2 }'
+  register: result_current_features
+  changed_when: false
+  when:
+    - result_check_profile is not skipped
+    - result_check_profile.rc == 0
+
+- name: Find differences in features
+  ansible.builtin.set_fact:
+    authselect_features_to_enable: "{{ authselect_required_features | difference(result_current_features.stdout_lines) }}"
+  when:
+    - result_current_features is not skipped
+    - result_current_features | length > 0
+    - authselect_required_features is defined
+    - authselect_required_features | length > 0
+
+- name: Select custom profile
+  ansible.builtin.command:
+    cmd: authselect select {{ authselect_profile_name }} {%- --force if result_check_profile.rc == 3 %}{%- endif %}
+  register: custom_profile_selected
+  when: result_check_profile.rc != 0 or result_authselect_in_use.rc != 0 or authselect_profile_name is not match(result_current_profile.stdout)
+
+- name: Enable missing features
+  ansible.builtin.command:
+    cmd: authselect enable-feature {{ item }}
+  loop: "{{ authselect_features_to_enable }}"
+  notify:
+    - authselect_apply_changes
+    - sssd_restart
+  when:
+    - authselect_features_to_enable is defined
+    - authselect_features_to_enable | length > 0
+
+- name: Default to adding all features
+  ansible.builtin.command:
+    cmd: authselect enable-feature {{ item }}
+  loop: "{{ authselect_required_features }}"
+  notify:
+    - authselect_apply_changes
+    - sssd_restart
+  when: result_current_features is skipped
+
+- name: Execute queued handlers
+  ansible.builtin.meta: flush_handlers
+  changed_when: false
+
+- name: Import system-auth file from template
+  ansible.builtin.template:
+    src: files/system-auth
+    dest: "/usr/share/authselect/vendor/{{ authselect_profile_name }}/system-auth"
+  notify:
+    - authselect_apply_changes
+    - sssd_restart
+  when: manage_system_auth
+
+- name: Import password-auth file from template
+  ansible.builtin.template:
+    src: files/password-auth
+    dest: "/usr/share/authselect/vendor/{{ authselect_profile_name }}/password-auth"
+  notify:
+    - authselect_apply_changes
+    - sssd_restart
+  when: manage_password_auth
+
+- name: Import postlogin file from template
+  ansible.builtin.template:
+    src: files/postlogin
+    dest: "/usr/share/authselect/vendor/{{ authselect_profile_name }}/postlogin"
+  notify:
+    - authselect_apply_changes
+    - sssd_restart
+  when: manage_postlogin
+
+- name: Import smartcard-auth file from template
+  ansible.builtin.template:
+    src: files/smartcard-auth
+    dest: "/usr/share/authselect/vendor/{{ authselect_profile_name }}/smartcard-auth"
+  notify:
+    - authselect_apply_changes
+    - sssd_restart
+  when: manage_smartcard_auth
+
+- name: Import nsswitch file from template
+  ansible.builtin.template:
+    src: files/nsswitch.conf
+    dest: "/usr/share/authselect/vendor/{{ authselect_profile_name }}/nsswitch.conf"
+  notify:
+    - authselect_apply_changes
+    - sssd_restart
+  when: manage_nsswitch_conf
+
+- name: Import user-nsswitch file from template
+  ansible.builtin.template:
+    src: files/user-nsswitch.conf
+    dest: "/etc/authselect/user-nsswitch.conf"
+  notify:
+    - authselect_apply_changes
+    - sssd_restart
+  when: manage_nsswitch_conf
+
+- name: Execute queued handlers
+  ansible.builtin.meta: flush_handlers
+  changed_when: false
+...

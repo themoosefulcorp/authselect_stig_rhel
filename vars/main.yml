@@ -1,0 +1,4 @@
+---
+authselect_profile_name: environment # dev, ops
+authselect_required_features: [ 'with-mkhomedir', 'with-subid', 'with-sudo', 'with-smartcard', 'with-smartcard-lock-on-removal', 'with-faillock', 'without-nullok', 'with-pwhistory' ]
+...

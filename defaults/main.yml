@@ -1,0 +1,7 @@
+---
+manage_system_auth: true
+manage_password_auth: true
+manage_postlogin: true
+manage_smartcard_auth: true
+manage_nsswitch_conf: true
+...
