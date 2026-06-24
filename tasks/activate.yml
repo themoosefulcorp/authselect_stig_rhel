@@ -1,0 +1,25 @@
+---
+- name: Attempt to activate the custom profile
+  ansible.builtin.command:
+    cmd: authselect select {{ __full_profile_name }}
+  register: __result_authselect_select
+  failed_when: __result_authselect_select.rc not in [0, 3, 4]
+  changed_when: __result_authselect_select.rc == 0
+
+- name: Add force flag to activation command based on previous return code
+  ansible.builtin.command:
+    cmd: authselect select {{ __full_profile_name }} --force
+  when: __result_authselect_select.rc in [3, 4]
+
+- name: Refresh current profile state after activation
+  ansible.builtin.command:
+    cmd: authselect current
+  register: __result_authselect_current
+  changed_when: false
+  failed_when: false
+
+- name: Re-parse the name of the now-active authselect profile
+  ansible.builtin.set_fact:
+    __current_profile_name: "{{ __result_authselect_current.stdout | regex_search('Profile ID: (\\S+)', '\\1') | default([], true) | first | default('', true) }}"
+  when: __result_authselect_current.rc == 0
+...

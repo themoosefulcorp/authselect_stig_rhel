@@ -1,7 +1,5 @@
 ---
-manage_system_auth: true
-manage_password_auth: true
-manage_postlogin: true
-manage_smartcard_auth: true
-manage_nsswitch_conf: true
+authselect_profile_name: stig
+authselect_desired_features: [ 'with-mkhomedir', 'with-subid', 'with-sudo', 'with-smartcard', 'with-smartcard-lock-on-removal', 'with-faillock', 'without-nullok', 'with-pwhistory' ]
+authselect_unwanted_features: []
 ...

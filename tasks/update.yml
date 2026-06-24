@@ -1,0 +1,43 @@
+---
+- name: Check if active custom profile is valid
+  ansible.builtin.command:
+    cmd: authselect check
+  register: __result_authselect_check
+  changed_when: false
+  failed_when: false
+
+- name: Delete the custom profile if it's active but invalid
+  ansible.builtin.file:
+    path: "/etc/authselect/custom/{{ authselect_profile_name }}"
+    state: absent
+  register: __invalid_profile_deleted
+  when: __result_authselect_check.rc != 0
+
+- name: Include tasks to recreate the custom authselect profile after deletion
+  ansible.builtin.include_tasks:
+    file: create.yml
+  when: __invalid_profile_deleted is changed
+
+- name: Include tasks to activate the created authselect profile
+  ansible.builtin.include_tasks:
+    file: activate.yml
+  when: __custom_profile_created is defined
+
+- name: Parse current features of a valid active custom profile
+  ansible.builtin.set_fact:
+    __current_profile_features: "{{ __result_authselect_current.stdout | regex_findall('- (\\S+)') }}"
+  when: __custom_profile_created is not defined
+
+- name: Determine features to enable (desired minus current minus unwanted)
+  ansible.builtin.set_fact:
+    __features_to_enable: "{{ authselect_desired_features
+      | difference(__current_profile_features | default([]))
+      | difference(authselect_unwanted_features) }}"
+  when: __custom_profile_created is not defined
+
+- name: Determine features to disable (intersection of current and unwanted)
+  ansible.builtin.set_fact:
+    __features_to_disable: "{{ __current_profile_features | default([])
+      | intersect(authselect_unwanted_features) }}"
+  when: __custom_profile_created is not defined
+...

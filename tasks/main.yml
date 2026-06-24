@@ -1,153 +1,149 @@
 ---
-- name: Update package facts
-  ansible.builtin.package_facts:
-    manager: auto
+- name: Gather minimum required facts
+  ansible.builtin.setup:
+    gather_subset:
+      - '!all'
+      - distribution
+      - distribution_major_version
+      - distribution_version
+  when:
+    - ansible_facts.distribution is not defined
+      or ansible_facts.distribution_major_version is not defined
+      or ansible_facts.distribution_version is not defined
 
-- name: Install authselect package
-  ansible.builtin.package:
-    name: authselect
+- name: Assert that the current OS is either RHEL 8 or 9
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'RedHat'
+      - ansible_facts.distribution_major_version in [ '8', '9' ]
+    fail_msg: "This role has only been tested on RHEL 8 and 9"
+  
+- name: Fail if RHEL version is < 8.4
+  ansible.builtin.fail:
+    msg: "STIGs are applied differently on older versions of RHEL. Ain't nobody got time for that"
+  when:
+    - ansible_facts.distribution_major_version == '8'
+    - ansible_facts.distribution_version is version('8.4', '<')
+
+- name: Install prerequisite packages
+  ansible.builtin.dnf:
+    name:
+      - authselect
+      - sssd
     state: present
 
-- name: Check if the custom profile exists
+- name: List available authselect profiles
   ansible.builtin.command:
-    cmd: authselect list-features {{ authselect_profile_name }}
-  register: result_custom_profile_exists
+    cmd: authselect list
+  register: __result_authselect_list
   changed_when: false
-  failed_when: false
 
-- name: Create custom profile
-  ansible.builtin.command:
-    cmd: authselect create-profile {{ authselect_profile_name }} -v -b sssd --symlink-meta
-  when: result_custom_profile_exists.rc == 2
+- name: Determine full profile name
+  ansible.builtin.set_fact:
+    __full_profile_name: "custom/{{ authselect_profile_name }}"
 
-- name: Check if authselect is in use
+# you could be using authselect, but not have the custom profile created
+- name: Include tasks to create a custom authselect profile
+  ansible.builtin.include_tasks:
+    file: create.yml
+  when: __full_profile_name not in __result_authselect_list.stdout_lines
+
+- name: Check if authselect is currently in use
   ansible.builtin.command:
     cmd: authselect current
-  register: result_authselect_in_use
+  register: __result_authselect_current
   changed_when: false
   failed_when: false
 
-- name: Set a temporary default profile
-  ansible.builtin.command:
-    cmd: authselect select sssd --force
-  when: result_authselect_in_use.rc != 0
-
-- name: Get current profile
-  ansible.builtin.shell:
-    cmd: authselect current -r | awk '{ print $1 }'
-  register: result_current_profile
-  changed_when: false
-  when: result_authselect_in_use.rc == 0
-
-- name: Check if current authselect profile is valid
-  ansible.builtin.command:
-    cmd: authselect check
-  register: result_check_profile
-  changed_when: false
-  failed_when: false
-  when: result_current_profile is not skipped
-
-- name: Check current profile features
-  ansible.builtin.shell:
-    cmd: authselect current | tail -n+3 | awk '{ print $2 }'
-  register: result_current_features
-  changed_when: false
-  when:
-    - result_check_profile is not skipped
-    - result_check_profile.rc == 0
-
-- name: Find differences in features
+- name: Parse the name of the currently used authselect profile
   ansible.builtin.set_fact:
-    authselect_features_to_enable: "{{ authselect_required_features | difference(result_current_features.stdout_lines) }}"
-  when:
-    - result_current_features is not skipped
-    - result_current_features | length > 0
-    - authselect_required_features is defined
-    - authselect_required_features | length > 0
+    __current_profile_name: "{{ __result_authselect_current.stdout | regex_search('Profile ID: (\\S+)', '\\1') | default([], true) | first | default('', true) }}"
+  when: __result_authselect_current.rc == 0
 
-- name: Select custom profile
-  ansible.builtin.command:
-    cmd: authselect select {{ authselect_profile_name }} {%- --force if result_check_profile.rc == 3 %}{%- endif %}
-  register: custom_profile_selected
-  when: result_check_profile.rc != 0 or result_authselect_in_use.rc != 0 or authselect_profile_name is not match(result_current_profile.stdout)
+# a brand-new profile is inherently valid. skip straight to activation
+- name: Include tasks to activate a newly created custom authselect profile
+  ansible.builtin.include_tasks:
+    file: activate.yml
+  when: __custom_profile_created is defined
+
+# classify the existing profile's state once, before any activation, so the two reconcile paths below are mutually exclusive.
+- name: Record whether the custom profile is already the active one
+  ansible.builtin.set_fact:
+    __profile_already_active: "{{ __current_profile_name is defined and __current_profile_name == __full_profile_name }}"
+  when: __custom_profile_created is not defined
+
+# profile exists and is already active. validate and reconcile features.
+- name: Include tasks to update an existing active custom authselect profile
+  ansible.builtin.include_tasks:
+    file: update.yml
+  when:
+    - __custom_profile_created is not defined
+    - __profile_already_active | bool
+
+# profile exists but isn't active. select it, then reconcile.
+# activation makes it current, so update.yml's check and feature parse then operate on the correct (now-active) profile.
+- name: Include tasks to activate an existing but inactive custom profile
+  ansible.builtin.include_tasks:
+    file: activate.yml
+  when:
+    - __custom_profile_created is not defined
+    - not (__profile_already_active | bool)
+
+- name: Reconcile features after activating a previously inactive profile
+  ansible.builtin.include_tasks:
+    file: update.yml
+  when:
+    - __custom_profile_created is not defined
+    - not (__profile_already_active | bool)
+
+- name: Populate system-auth file
+  ansible.builtin.copy:
+    src: "system-auth.el{{ ansible_facts.distribution_major_version }}"
+    dest: "/etc/authselect/custom/{{ authselect_profile_name }}/system-auth"
+  notify:
+    - authselect_apply_changes
+    - sssd_restart
+  when: (role_path ~ '/files/system-auth.el' ~ ansible_facts.distribution_major_version) is exists
+
+- name: Populate password-auth file
+  ansible.builtin.copy:
+    src: "password-auth.el{{ ansible_facts.distribution_major_version }}"
+    dest: "/etc/authselect/custom/{{ authselect_profile_name }}/password-auth"
+  notify:
+    - authselect_apply_changes
+    - sssd_restart
+  when: (role_path ~ '/files/password-auth.el' ~ ansible_facts.distribution_major_version) is exists
+
+- name: Populate smartcard-auth file
+  ansible.builtin.copy:
+    src: "smartcard-auth.el{{ ansible_facts.distribution_major_version }}"
+    dest: "/etc/authselect/custom/{{ authselect_profile_name }}/smartcard-auth"
+  notify:
+    - authselect_apply_changes
+    - sssd_restart
+  when: (role_path ~ '/files/smartcard-auth.el' ~ ansible_facts.distribution_major_version) is exists
 
 - name: Enable missing features
   ansible.builtin.command:
     cmd: authselect enable-feature {{ item }}
-  loop: "{{ authselect_features_to_enable }}"
+  loop: "{{ __features_to_enable }}"
   notify:
     - authselect_apply_changes
     - sssd_restart
   when:
-    - authselect_features_to_enable is defined
-    - authselect_features_to_enable | length > 0
+    - __features_to_enable is defined
+    - __features_to_enable | length > 0
 
-- name: Default to adding all features
+- name: Remove unwanted features
   ansible.builtin.command:
-    cmd: authselect enable-feature {{ item }}
-  loop: "{{ authselect_required_features }}"
+    cmd: authselect disable-feature {{ item }}
+  loop: "{{ __features_to_disable }}"
   notify:
     - authselect_apply_changes
     - sssd_restart
-  when: result_current_features is skipped
-
-- name: Execute queued handlers
-  ansible.builtin.meta: flush_handlers
-  changed_when: false
-
-- name: Import system-auth file from template
-  ansible.builtin.template:
-    src: files/system-auth
-    dest: "/usr/share/authselect/vendor/{{ authselect_profile_name }}/system-auth"
-  notify:
-    - authselect_apply_changes
-    - sssd_restart
-  when: manage_system_auth
-
-- name: Import password-auth file from template
-  ansible.builtin.template:
-    src: files/password-auth
-    dest: "/usr/share/authselect/vendor/{{ authselect_profile_name }}/password-auth"
-  notify:
-    - authselect_apply_changes
-    - sssd_restart
-  when: manage_password_auth
-
-- name: Import postlogin file from template
-  ansible.builtin.template:
-    src: files/postlogin
-    dest: "/usr/share/authselect/vendor/{{ authselect_profile_name }}/postlogin"
-  notify:
-    - authselect_apply_changes
-    - sssd_restart
-  when: manage_postlogin
-
-- name: Import smartcard-auth file from template
-  ansible.builtin.template:
-    src: files/smartcard-auth
-    dest: "/usr/share/authselect/vendor/{{ authselect_profile_name }}/smartcard-auth"
-  notify:
-    - authselect_apply_changes
-    - sssd_restart
-  when: manage_smartcard_auth
-
-- name: Import nsswitch file from template
-  ansible.builtin.template:
-    src: files/nsswitch.conf
-    dest: "/usr/share/authselect/vendor/{{ authselect_profile_name }}/nsswitch.conf"
-  notify:
-    - authselect_apply_changes
-    - sssd_restart
-  when: manage_nsswitch_conf
-
-- name: Import user-nsswitch file from template
-  ansible.builtin.template:
-    src: files/user-nsswitch.conf
-    dest: "/etc/authselect/user-nsswitch.conf"
-  notify:
-    - authselect_apply_changes
-    - sssd_restart
-  when: manage_nsswitch_conf
+  when:
+    - __features_to_disable is defined
+    - __features_to_disable | length > 0
 
 - name: Execute queued handlers
   ansible.builtin.meta: flush_handlers

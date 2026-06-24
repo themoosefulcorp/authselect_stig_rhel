@@ -1,0 +1,9 @@
+---
+- hosts: localhost
+  # debugger: on_failed
+  gather_facts: false
+  roles:
+    - authselect_stig_rhel
+  vars:
+    authselect_unwanted_features: [ 'with-smartcard-lock-on-removal' ]
+...

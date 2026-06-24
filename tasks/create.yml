@@ -1,0 +1,12 @@
+---
+- name: Create custom STIG profile based on built-in sssd profile
+  ansible.builtin.command:
+    cmd: >
+      authselect create-profile {{ authselect_profile_name }}
+      --base-on=sssd --symlink-nsswitch --symlink-meta
+  register: __custom_profile_created
+
+- name: Determine features to enable (desired minus unwanted)
+  ansible.builtin.set_fact:
+    __features_to_enable: "{{ authselect_desired_features | difference(authselect_unwanted_features) }}"
+...
